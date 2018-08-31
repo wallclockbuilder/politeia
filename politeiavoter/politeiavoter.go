@@ -20,6 +20,7 @@ import (
 	"github.com/decred/politeia/politeiad/api/v1/identity"
 	"github.com/decred/politeia/politeiawww/api/v1"
 	"github.com/decred/politeia/util"
+	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/schema"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/publicsuffix"
@@ -439,6 +440,12 @@ func (c *ctx) _vote(token, voteId string) ([]string, *v1.BallotReply, error) {
 			Message: msg,
 		})
 	}
+	x, err := proto.Marshal(sm)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	fmt.Printf("size: %v\n", len(x))
 	smr, err := c.wallet.SignMessages(c.ctx, sm)
 	if err != nil {
 		return nil, nil, err
