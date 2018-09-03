@@ -1398,6 +1398,17 @@ func (g *gitBackEnd) _updateRecord(commit bool, id string, mdAppend, mdOverwrite
 		return err
 	}
 
+	// Check for authorizevote metadata and delete it if found
+	avFilename := fmt.Sprintf("%02v%v", decredplugin.MDStreamAuthorizeVote,
+		defaultMDFilenameSuffix)
+	_, err = os.Stat(pijoin(joinLatest(g.unvetted, id), avFilename))
+	if err == nil {
+		err = g.gitRm(g.unvetted, pijoin(id, version, avFilename), true)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Call plugin hooks
 	f, ok := decredPluginHooks[PluginPostHookEdit]
 	if ok {
@@ -2145,6 +2156,9 @@ func (g *gitBackEnd) GetPlugins() ([]backend.Plugin, error) {
 func (g *gitBackEnd) Plugin(command, payload string) (string, string, error) {
 	log.Tracef("Plugin: %v %v", command, payload)
 	switch command {
+	case decredplugin.CmdAuthorizeVote:
+		payload, err := g.pluginAuthorizeVote(payload)
+		return decredplugin.CmdAuthorizeVote, payload, err
 	case decredplugin.CmdStartVote:
 		payload, err := g.pluginStartVote(payload)
 		return decredplugin.CmdStartVote, payload, err
