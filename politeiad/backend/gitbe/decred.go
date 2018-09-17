@@ -1618,6 +1618,7 @@ func (g *gitBackEnd) pluginAuthorizeVote(payload string) (string, error) {
 
 	// Verify proposal state
 	g.Lock()
+	defer g.Unlock()
 	if g.shutdown {
 		return "", backend.ErrShutdown
 	}
@@ -1628,8 +1629,6 @@ func (g *gitBackEnd) pluginAuthorizeVote(payload string) (string, error) {
 	_, err2 := os.Stat(pijoin(joinLatest(g.vetted, token),
 		fmt.Sprintf("%02v%v", decredplugin.MDStreamVoteBits,
 			defaultMDFilenameSuffix)))
-
-	g.Unlock()
 
 	if err1 == nil {
 		// Vote has already been authorized
@@ -1643,14 +1642,14 @@ func (g *gitBackEnd) pluginAuthorizeVote(payload string) (string, error) {
 	}
 
 	// Update metadata
-	err = g.UpdateVettedMetadata(tokenb, nil, []backend.MetadataStream{
+	err = g._updateVettedMetadata(tokenb, nil, []backend.MetadataStream{
 		{
 			ID:      decredplugin.MDStreamAuthorizeVote,
 			Payload: string(avb),
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("UpdateVettedMetadata: %v", err)
+		return "", fmt.Errorf("_updateVettedMetadata: %v", err)
 	}
 
 	log.Infof("Vote authorized for %v", token)
@@ -1681,40 +1680,6 @@ func (g *gitBackEnd) pluginStartVote(payload string) (string, error) {
 
 	if !g.propExists(g.vetted, token) {
 		return "", fmt.Errorf("unknown proposal: %v", token)
-	}
-
-	// Verify proposal state
-	g.Lock()
-	if g.shutdown {
-		return "", backend.ErrShutdown
-	}
-
-	_, err1 := os.Stat(pijoin(joinLatest(g.vetted, token),
-		fmt.Sprintf("%02v%v", decredplugin.MDStreamAuthorizeVote,
-			defaultMDFilenameSuffix)))
-	_, err2 := os.Stat(pijoin(joinLatest(g.vetted, token),
-		fmt.Sprintf("%02v%v", decredplugin.MDStreamVoteBits,
-			defaultMDFilenameSuffix)))
-	_, err3 := os.Stat(pijoin(joinLatest(g.vetted, token),
-		fmt.Sprintf("%02v%v", decredplugin.MDStreamVoteSnapshot,
-			defaultMDFilenameSuffix)))
-
-	g.Unlock()
-
-	if err1 != nil {
-		// Vote has not been authorized by proposal author
-		return "", fmt.Errorf("proposal author has not authorized vote: %v",
-			token)
-	} else if err2 != nil && err3 != nil {
-		// Vote has not started, continue
-	} else if err2 == nil && err3 == nil {
-		// Vote has started
-		return "", fmt.Errorf("proposal vote already started: %v",
-			token)
-	} else {
-		// This is bad, both files should exist or not exist
-		return "", fmt.Errorf("proposal is unknown vote state: %v",
-			token)
 	}
 
 	// 1. Get best block
@@ -1770,8 +1735,42 @@ func (g *gitBackEnd) pluginStartVote(payload string) (string, error) {
 		return "", fmt.Errorf("EncodeStartVote: %v", err)
 	}
 
+	// Verify proposal state
+	g.Lock()
+	defer g.Unlock()
+	if g.shutdown {
+		// Make sure we are not shutting down
+		return "", backend.ErrShutdown
+	}
+
+	_, err1 := os.Stat(pijoin(joinLatest(g.vetted, token),
+		fmt.Sprintf("%02v%v", decredplugin.MDStreamAuthorizeVote,
+			defaultMDFilenameSuffix)))
+	_, err2 := os.Stat(pijoin(joinLatest(g.vetted, token),
+		fmt.Sprintf("%02v%v", decredplugin.MDStreamVoteBits,
+			defaultMDFilenameSuffix)))
+	_, err3 := os.Stat(pijoin(joinLatest(g.vetted, token),
+		fmt.Sprintf("%02v%v", decredplugin.MDStreamVoteSnapshot,
+			defaultMDFilenameSuffix)))
+
+	if err1 != nil {
+		// Vote has not been authorized by proposal author
+		return "", fmt.Errorf("proposal author has not authorized vote: %v",
+			token)
+	} else if err2 != nil && err3 != nil {
+		// Vote has not started, continue
+	} else if err2 == nil && err3 == nil {
+		// Vote has started
+		return "", fmt.Errorf("proposal vote already started: %v",
+			token)
+	} else {
+		// This is bad, both files should exist or not exist
+		return "", fmt.Errorf("proposal is unknown vote state: %v",
+			token)
+	}
+
 	// Store snapshot in metadata
-	err = g.UpdateVettedMetadata(tokenB, nil, []backend.MetadataStream{
+	err = g._updateVettedMetadata(tokenB, nil, []backend.MetadataStream{
 		{
 			ID:      decredplugin.MDStreamVoteBits,
 			Payload: string(voteb),
@@ -1781,7 +1780,7 @@ func (g *gitBackEnd) pluginStartVote(payload string) (string, error) {
 			Payload: string(svrb),
 		}})
 	if err != nil {
-		return "", fmt.Errorf("UpdateVettedMetadata: %v", err)
+		return "", fmt.Errorf("_updateVettedMetadata: %v", err)
 	}
 
 	log.Infof("Vote started for: %v snapshot %v start %v end %v",
