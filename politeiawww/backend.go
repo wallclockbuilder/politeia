@@ -2136,7 +2136,7 @@ func (b *backend) ProcessComment(c www.NewComment, user *database.User) (*www.Ne
 
 	ncrWWW := b.convertDecredNewCommentReplyToWWWNewCommentReply(*ncr)
 
-	err = b._setRecordComment(ncrWWW.Comment)
+	err = b.setRecordComment(ncrWWW.Comment)
 	if err != nil {
 		return nil, fmt.Errorf("setRecordComment %v", err)
 	}
