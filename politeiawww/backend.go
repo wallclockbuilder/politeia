@@ -2286,7 +2286,7 @@ func (b *backend) ProcessCensorComment(cc www.CensorComment, user *database.User
 
 	// get the proposal record from inventory
 	b.RLock()
-	ir, err := b.getInventoryRecord(cc.Token)
+	ir, err := b._getInventoryRecord(cc.Token)
 	if err != nil {
 		b.RUnlock()
 		return nil, www.UserError{
