@@ -87,6 +87,13 @@ type backend struct {
 
 	// inventory will eventually replace inventory
 	inventory map[string]*inventoryRecord // Current inventory
+
+	// Inventory stats
+	numOfCensored        int
+	numOfUnvetted        int
+	numOfUnvettedChanges int
+	numOfPublic          int
+	numOfInvalid         int
 }
 
 type BackendProposalMetadata struct {
@@ -1715,17 +1722,16 @@ func (b *backend) ProcessNewProposal(np www.NewProposal, user *database.User) (*
 		}
 
 		// Add the new proposal to the cache.
-		b.Lock()
-		err = b._newInventoryRecord(pd.Record{
+		err = b.newInventoryRecord(pd.Record{
 			Status:           pd.RecordStatusNotReviewed,
 			Timestamp:        ts,
 			CensorshipRecord: pdReply.CensorshipRecord,
 			Metadata:         n.Metadata,
 			Version:          "1",
 		})
-		b.Unlock()
 		if err != nil {
-			log.Errorf("ProcessNewProposal could not add record into inventory: %v", err)
+			log.Errorf("ProcessNewProposal could not add record "+
+				"into inventory: %v", err)
 		}
 	} else {
 		responseBody, err := b.makeRequest(http.MethodPost,
@@ -1752,17 +1758,16 @@ func (b *backend) ProcessNewProposal(np www.NewProposal, user *database.User) (*
 		}
 
 		// Add the new proposal to the inventory cache.
-		b.Lock()
-		b._newInventoryRecord(pd.Record{
+		b.newInventoryRecord(pd.Record{
 			Status:           pd.RecordStatusNotReviewed,
 			Timestamp:        ts,
 			CensorshipRecord: pdReply.CensorshipRecord,
 			Metadata:         n.Metadata,
 			Version:          "1",
 		})
-		b.Unlock()
 		if err != nil {
-			log.Errorf("ProcessNewProposal could not add record into inventory: %v", err)
+			log.Errorf("ProcessNewProposal could not add record "+
+				"into inventory: %v", err)
 		}
 	}
 
@@ -1816,7 +1821,7 @@ func (b *backend) ProcessSetProposalStatus(sps www.SetProposalStatus, user *data
 		// When not in testnet, block admins
 		// from changing the status of their own proposals
 		if !b.cfg.TestNet {
-			pr, err := b.getProposal(sps.Token)
+			pr, err := b._getProposal(sps.Token)
 			if err != nil {
 				return nil, err
 			}
@@ -1864,20 +1869,21 @@ func (b *backend) ProcessSetProposalStatus(sps www.SetProposalStatus, user *data
 
 		err = json.Unmarshal(responseBody, &pdReply)
 		if err != nil {
-			return nil, fmt.Errorf("Could not unmarshal SetUnvettedStatusReply: %v",
-				err)
+			return nil, fmt.Errorf("Could not unmarshal "+
+				"SetUnvettedStatusReply: %v", err)
 		}
 
 		// Verify the challenge.
-		err = util.VerifyChallenge(b.cfg.Identity, challenge, pdReply.Response)
+		err = util.VerifyChallenge(b.cfg.Identity, challenge,
+			pdReply.Response)
 		if err != nil {
 			return nil, err
 		}
 
-		// get record files from the inventory and update the response
+		// Get record files from the inventory and update the response
 		invRecord, err := b._getInventoryRecord(sps.Token)
 		if err != nil {
-			log.Infof("Inventory record not found %v", sps.Token)
+			log.Errorf("Inventory record not found %v", sps.Token)
 		} else {
 			pdReply.Record.Files = invRecord.record.Files
 		}
@@ -1943,17 +1949,19 @@ func (b *backend) ProcessProposalDetails(propDetails www.ProposalsDetails, user 
 	}
 
 	// The title and files for unvetted proposals should not be viewable by
-	// non-admins; only the proposal meta data (status, censorship data, etc)
-	// should be publicly viewable.
+	// non-admins; only the proposal meta data (status, censorship data,
+	// etc) should be publicly viewable.
 	isUserAdmin := user != nil && user.Admin
 
 	var isUserTheAuthor bool
 	if user != nil {
 		authorID, err := uuid.Parse(cachedProposal.UserId)
 		if err != nil {
-			// Only complain and move on since some of the proposals details
-			// can still be sent for a non-admin or a non-author user
-			log.Infof("ProcessProposalDetails: ParseUint failed on '%v': %v", cachedProposal.UserId, err)
+			// Only complain and move on since some of the
+			// proposals details can still be sent for a non-admin
+			// or a non-author user
+			log.Infof("ProcessProposalDetails: ParseUint failed "+
+				"on '%v': %v", cachedProposal.UserId, err)
 		}
 
 		isUserTheAuthor = authorID == user.ID
@@ -2048,13 +2056,8 @@ func (b *backend) ProcessComment(c www.NewComment, user *database.User) (*www.Ne
 		return nil, err
 	}
 
-	// the lock is necessary to treat race conditions of multiple attempts
-	// to change the record. (e.g: a proposal change to a status where
-	// comments are no longer accepted)
-	b.Lock()
-	defer b.Unlock()
-
-	ir, err := b._getInventoryRecord(c.Token)
+	// Note that we are not racing ir because it is a copy.
+	ir, err := b.getInventoryRecord(c.Token)
 	if err != nil {
 		return nil, www.UserError{
 			ErrorCode: www.ErrorStatusProposalNotFound,
@@ -2281,14 +2284,11 @@ func (b *backend) ProcessCensorComment(cc www.CensorComment, user *database.User
 		}
 	}
 
-	// the lock is necessary to treat race conditions of multiple admins
-	// censoring the same comment
-	b.Lock()
-	defer b.Unlock()
-
 	// get the proposal record from inventory
-	ir, err := b._getInventoryRecord(cc.Token)
+	b.RLock()
+	ir, err := b.getInventoryRecord(cc.Token)
 	if err != nil {
+		b.RUnlock()
 		return nil, www.UserError{
 			ErrorCode: www.ErrorStatusProposalNotFound,
 		}
@@ -2297,9 +2297,11 @@ func (b *backend) ProcessCensorComment(cc www.CensorComment, user *database.User
 	// Ensure comment exists and has not already been censored.
 	c, err := b._getInventoryRecordComment(cc.Token, cc.CommentID)
 	if err != nil {
+		b.RUnlock()
 		return nil, fmt.Errorf("comment not found %v: %v",
 			cc.Token, cc.CommentID)
 	}
+	b.RUnlock()
 	if c.Censored {
 		return nil, www.UserError{
 			ErrorCode: www.ErrorStatusCannotCensorComment,
@@ -2365,11 +2367,15 @@ func (b *backend) ProcessCensorComment(cc www.CensorComment, user *database.User
 	ccrWWW := convertDecredCensorCommentReplyToWWWCensorCommentReply(*ccr)
 
 	// Update inventory cache.
+	b.Lock()
+	defer b.Unlock()
 	c, err = b._getInventoryRecordComment(cc.Token, cc.CommentID)
 	if err != nil {
-		return nil, fmt.Errorf("comment not found %v: %v", cc.Token, cc.CommentID)
+		return nil, fmt.Errorf("comment not found %v: %v", cc.Token,
+			cc.CommentID)
 	}
 
+	// Reset comment in cache
 	c.Comment = ""
 	c.Censored = true
 	err = b._setRecordComment(*c)
@@ -2729,8 +2735,8 @@ func (b *backend) ProcessVoteResults(token string) (*www.VoteResultsReply, error
 		return nil, err
 	}
 
-	// Fetch record from inventory in order to
-	// get the voting details (StartVoteReply)
+	// Fetch record from inventory in order to get the voting details
+	// (StartVoteReply)
 	ir, err := b.getInventoryRecord(token)
 	if err != nil {
 		return nil, www.UserError{
@@ -2749,7 +2755,7 @@ func (b *backend) ProcessVoteResults(token string) (*www.VoteResultsReply, error
 
 // ProcessGetAllVoteStatus returns the vote status of all public proposals
 func (b *backend) ProcessGetAllVoteStatus() (*www.GetAllVoteStatusReply, error) {
-	log.Infof("ProcessProposalsVotingStatus")
+	log.Infof("ProcessGetAllVoteStatus")
 	// We need to determine best block height here in order to set
 	// the voting status
 	bestBlock, err := b.getBestBlock()
@@ -2824,8 +2830,8 @@ func (b *backend) ProcessVoteStatus(token string) (*www.VoteStatusReply, error) 
 	}, nil
 }
 
-// ProcessUsernamesById returns the corresponding usernames for all given
-// user ids.
+// ProcessUsernamesById returns the corresponding usernames for all given user
+// ids.
 func (b *backend) ProcessUsernamesById(ubi www.UsernamesById) *www.UsernamesByIdReply {
 	var usernames []string
 	for _, userIdStr := range ubi.UserIds {
@@ -2921,28 +2927,39 @@ func (b *backend) ProcessUserCommentsVotes(user *database.User, token string) (*
 func (b *backend) ProcessEditProposal(user *database.User, ep www.EditProposal) (*www.EditProposalReply, error) {
 	log.Tracef("ProcessEditProposal %v", ep.Token)
 
-	// the lock is necessary to treat race conditions of multiple modifications
-	// attempts to the same proposal
-	b.Lock()
-	defer b.Unlock()
+	// verify that the proposal voting has not started
+	// This is expensive so do it ouseide of the lock.
+	bb, err := b.getBestBlock()
+	if err != nil {
+		return nil, err
+	}
 
+	// it is ok to race invRecord.
+	// In theory the user can not issue racing edit prop commands. In
+	// practice a network hickup can submit the same edit twice but then
+	// the decred plugin should reject the second call as "no changes".
+	// The result of a mallicous user that alters the code to issue
+	// concurent updates could result in out of order cache update.
+	// Politeaid will remain coherent.
+	b.RLock()
 	// get current proposal record from inventory
 	invRecord, err := b._getInventoryRecord(ep.Token)
 	if err != nil {
+		b.RUnlock()
 		return nil, www.UserError{
 			ErrorCode: www.ErrorStatusProposalNotFound,
 		}
 	}
-
 	cachedProposal := b._convertPropFromInventoryRecord(invRecord)
 
 	// verify if the user is the proposal owner
 	authorIDStr, ok := b.userPubkeys[cachedProposal.PublicKey]
-
 	if !ok {
+		b.RUnlock()
 		return nil, fmt.Errorf("public key not found %v",
 			cachedProposal.PublicKey)
 	}
+	b.RUnlock()
 
 	authorID, err := uuid.Parse(authorIDStr)
 	if err != nil {
@@ -2954,11 +2971,6 @@ func (b *backend) ProcessEditProposal(user *database.User, ep www.EditProposal) 
 		}
 	}
 
-	// verify that the proposal voting has not started
-	bb, err := b.getBestBlock()
-	if err != nil {
-		return nil, err
-	}
 	voteStatus := getVoteStatus(invRecord, bb)
 	if voteStatus == www.PropVoteStatusStarted ||
 		voteStatus == www.PropVoteStatusFinished {
@@ -3057,18 +3069,24 @@ func (b *backend) ProcessEditProposal(user *database.User, ep www.EditProposal) 
 			err)
 	}
 
+	b.Lock()
+	defer b.Unlock()
+
 	// Delete vote authorization if one existed before the edit
 	if invRecord.voteAuthorization.Receipt != "" {
-		err = b.setRecordVoteAuthorization(ep.Token, www.AuthorizeVoteReply{})
+		err = b._setRecordVoteAuthorization(ep.Token,
+			www.AuthorizeVoteReply{})
 		if err != nil {
-			return nil, fmt.Errorf("setRecordVoteAuthorization: %v", err)
+			return nil, fmt.Errorf("setRecordVoteAuthorization: %v",
+				err)
 		}
 	}
 
 	// update inventory record
 	err = b._updateInventoryRecord(pdReply.Record)
 	if err != nil {
-		return nil, fmt.Errorf("ProcessEditProposal: updateInventoryRecord %v", err)
+		return nil, fmt.Errorf("ProcessEditProposal: "+
+			"updateInventoryRecord %v", err)
 	}
 
 	return &www.EditProposalReply{
@@ -3096,9 +3114,11 @@ func (b *backend) ProcessPolicy(p www.Policy) *www.PolicyReply {
 	}
 }
 
-// ProcessProposalStats returns the counting of proposals aggrouped by each proposal status
+// ProcessProposalStats returns the counting of proposals aggrouped by each
+// proposal status
+// Must be called WITHOUT holding the mutex.
 func (b *backend) ProcessProposalsStats() www.ProposalsStatsReply {
-	ps := getProposalsStats()
+	ps := b.getProposalsStats()
 	return www.ProposalsStatsReply{
 		NumOfCensored:        ps.NumOfCensored,
 		NumOfUnvetted:        ps.NumOfUnvetted,

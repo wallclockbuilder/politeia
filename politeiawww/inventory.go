@@ -17,14 +17,6 @@ import (
 	"github.com/decred/politeia/util"
 )
 
-var (
-	NumOfCensored        = 0
-	NumOfUnvetted        = 0
-	NumOfUnvettedChanges = 0
-	NumOfPublic          = 0
-	NumOfInvalid         = 0
-)
-
 type inventoryRecord struct {
 	record            pd.Record               // actual record
 	proposalMD        BackendProposalMetadata // proposal metadata
@@ -54,17 +46,20 @@ type proposalsStats struct {
 }
 
 // getProposalsStats returns the counting of proposals by each status
-func getProposalsStats() proposalsStats {
+// Must be called WITHOUT the mutex held.
+func (b *backend) getProposalsStats() proposalsStats {
+	b.RLock()
+	defer b.RUnlock()
 	return proposalsStats{
-		NumOfInvalid:         NumOfInvalid,
-		NumOfCensored:        NumOfCensored,
-		NumOfUnvetted:        NumOfUnvetted,
-		NumOfUnvettedChanges: NumOfUnvettedChanges,
-		NumOfPublic:          NumOfPublic,
+		NumOfInvalid:         b.numOfInvalid,
+		NumOfCensored:        b.numOfCensored,
+		NumOfUnvetted:        b.numOfUnvetted,
+		NumOfUnvettedChanges: b.numOfUnvettedChanges,
+		NumOfPublic:          b.numOfPublic,
 	}
 }
 
-// newInventoryRecord adds a record to the inventory
+// _newInventoryRecord adds a record to the inventory.
 //
 // This function must be called WITH the mutex held.
 func (b *backend) _newInventoryRecord(record pd.Record) error {
@@ -81,9 +76,18 @@ func (b *backend) _newInventoryRecord(record pd.Record) error {
 	b.loadRecordMetadata(record)
 
 	// update inventory count
-	updateInventoryCountOfPropStatus(record.Status, nil)
+	b._updateInventoryCountOfPropStatus(record.Status, nil)
 
 	return nil
+}
+
+// newInventoryRecord adds a record to the inventory.
+//
+// This function must be called WITHOUT the mutex held.
+func (b *backend) newInventoryRecord(record pd.Record) error {
+	b.Lock()
+	defer b.Unlock()
+	return b._newInventoryRecord(record)
 }
 
 // updateInventoryRecord updates an existing record.
@@ -96,7 +100,7 @@ func (b *backend) _updateInventoryRecord(record pd.Record) error {
 	}
 
 	// update inventory count
-	updateInventoryCountOfPropStatus(record.Status, &ir.record.Status)
+	b._updateInventoryCountOfPropStatus(record.Status, &ir.record.Status)
 
 	// update record
 	ir.record = record
@@ -109,19 +113,19 @@ func (b *backend) _updateInventoryRecord(record pd.Record) error {
 // updateInventoryCount updates the count of proposals by each statys
 //
 // this function must be called WITH the mutex held
-func updateInventoryCountOfPropStatus(status pd.RecordStatusT, oldStatus *pd.RecordStatusT) {
+func (b *backend) _updateInventoryCountOfPropStatus(status pd.RecordStatusT, oldStatus *pd.RecordStatusT) {
 	executeUpdate := func(v int, status www.PropStatusT) {
 		switch status {
 		case www.PropStatusUnreviewedChanges:
-			NumOfUnvettedChanges += v
+			b.numOfUnvettedChanges += v
 		case www.PropStatusNotReviewed:
-			NumOfUnvetted += v
+			b.numOfUnvetted += v
 		case www.PropStatusCensored:
-			NumOfCensored += v
+			b.numOfCensored += v
 		case www.PropStatusPublic:
-			NumOfPublic += v
+			b.numOfPublic += v
 		default:
-			NumOfInvalid += v
+			b.numOfInvalid += v
 		}
 	}
 	// decrease count for old status
@@ -428,6 +432,16 @@ func (b *backend) _setRecordComment(comment www.Comment) error {
 	return nil
 }
 
+// setRecordComment sets a comment alongside the record's comments (if any)
+// this can be used for adding or updating a comment
+//
+// This function must be called WITHOUT the mutex held
+func (b *backend) setRecordComment(comment www.Comment) error {
+	b.Lock()
+	defer b.Unlock()
+	return b._setRecordComment(comment)
+}
+
 // setRecordVoting sets the voting of a proposal
 // this can be used for adding or updating a proposal voting
 //
@@ -450,11 +464,8 @@ func (b *backend) _setRecordVoting(token string, sv www.StartVote, svr www.Start
 // setRecordVoteAuthorization sets the vote authorization metadata for the
 // specified inventory record.
 //
-// This function must be called WITHOUT the mutex held.
-func (b *backend) setRecordVoteAuthorization(token string, avr www.AuthorizeVoteReply) error {
-	b.Lock()
-	defer b.Unlock()
-
+// This function must be called WITH the mutex held.
+func (b *backend) _setRecordVoteAuthorization(token string, avr www.AuthorizeVoteReply) error {
 	// Sanity check
 	_, ok := b.inventory[token]
 	if !ok {
@@ -467,10 +478,20 @@ func (b *backend) setRecordVoteAuthorization(token string, avr www.AuthorizeVote
 	return nil
 }
 
-// getProposal returns a single proposal by its token
+// setRecordVoteAuthorization sets the vote authorization metadata for the
+// specified inventory record.
+//
+// This function must be called WITHOUT the mutex held.
+func (b *backend) setRecordVoteAuthorization(token string, avr www.AuthorizeVoteReply) error {
+	b.Lock()
+	defer b.Unlock()
+	return b._setRecordVoteAuthorization(token, avr)
+}
+
+// _getProposal returns a single proposal by its token
 //
 // This function must be called WITH the mutex held.
-func (b *backend) getProposal(token string) (www.ProposalRecord, error) {
+func (b *backend) _getProposal(token string) (www.ProposalRecord, error) {
 	ir, err := b._getInventoryRecord(token)
 	if err != nil {
 		return www.ProposalRecord{}, err
